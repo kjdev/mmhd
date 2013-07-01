@@ -213,7 +213,7 @@ response_cb(void *cls, struct MHD_Connection *connection, const char *url,
 
     if (file == NULL) {
         content = contents_generate(&content_length,
-                                    "File not found", 12,
+                                    "File not found", 14,
                                     NULL, 0,
                                     params->style_file);
         if (content == NULL) {
