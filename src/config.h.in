@@ -1,0 +1,8 @@
+#ifndef __MMHD_H__
+#define __MMHD_H__
+
+#define MMHD_VERSION_MAJOR @MAJOR_VERSION@
+#define MMHD_VERSION_MINOR @MINOR_VERSION@
+#define MMHD_VERSION_BUILD @BUILD_VERSION@
+
+#endif

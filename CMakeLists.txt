@@ -9,8 +9,16 @@ SET(CMAKE_C_FLAGS_DEBUG "-W -g")
 # Project name
 # mmhd: micro markdown http server
 PROJECT(mmhd)
-# Project version
-# SET(_VERSION "1.0.0")
+SET(MAJOR_VERSION 1)
+SET(MINOR_VERSION 1)
+SET(BUILD_VERSION 0)
+#SET(REVISION_VERSION 0)
+
+# Configure
+CONFIGURE_FILE(
+  ${PROJECT_SOURCE_DIR}/src/config.h.in
+  ${CMAKE_CURRENT_BINARY_DIR}/config.h)
+INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR})
 
 # libmicrohttpd
 FIND_PATH(LIBMICROHTTPD_INCLUDES
@@ -34,14 +42,15 @@ ENDIF()
 INCLUDE_DIRECTORIES(${LIBMICROHTTPD_INCLUDES})
 SET(LIBMICROHTTPD_LIBS "${LIBMICROHTTPD_LIBRARIES}")
 
-# sundown sources
-SET(SUNDOWN_SOURCES
-  src/sundown/autolink.c src/sundown/houdini_html_e.c src/sundown/markdown.c
-  src/sundown/buffer.c src/sundown/html.c src/sundown/stack.c
-  src/sundown/houdini_href_e.c src/sundown/html_smartypants.c)
+# hoedown sources
+SET(HOEDOWN_SOURCES
+  src/hoedown/src/autolink.c src/hoedown/src/buffer.c src/hoedown/src/escape.c
+  src/hoedown/src/html.c src/hoedown/src/html_blocks.c
+  src/hoedown/src/html_smartypants.c src/hoedown/src/markdown.c
+  src/hoedown/src/stack.c)
 
 # execute
-ADD_EXECUTABLE(mmhd src/main.c ${SUNDOWN_SOURCES})
+ADD_EXECUTABLE(mmhd src/main.c ${HOEDOWN_SOURCES})
 TARGET_LINK_LIBRARIES(mmhd ${LIBMICROHTTPD_LIBS})
 
 # include

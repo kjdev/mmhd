@@ -16,18 +16,21 @@
 #include <syslog.h>
 #include <signal.h>
 
+#include "config.h"
+
 static int interrupted = 0;
-static int verbose = 0;
+static int msgno = 0;
 
-#define _err(...) fprintf(stderr, "ERR: "__VA_ARGS__)
-#define _debug(l, ...) if (verbose >= l) { printf(__VA_ARGS__); }
+#define msg_error(...) if (msgno >= 0) fprintf(stderr, "mmhd: "__VA_ARGS__)
+#define msg_verbose(...) if (msgno > 0) msg_error(__VA_ARGS__)
+#define msg_verbose_ex(_level, ...) if (msgno >= _level) msg_error(__VA_ARGS__)
 
-#include "sundown/markdown.h"
-#include "sundown/html.h"
-#include "sundown/buffer.h"
+#include "hoedown/src/markdown.h"
+#include "hoedown/src/html.h"
+#include "hoedown/src/buffer.h"
 
-#define SUNDOWN_READ_UNIT   1024
-#define SUNDOWN_OUTPUT_UNIT 64
+#define HOEDOWN_READ_UNIT   1024
+#define HOEDOWN_OUTPUT_UNIT 64
 
 #define BLOCK_SIZE 32768  /* 32k page size */
 
@@ -37,11 +40,15 @@ static int verbose = 0;
 #define DEFAULT_STYLE "<!DOCTYPE html><html><head><meta http-equiv=\"Content-Type\" content=\"text/html;charset=UTF-8\"/><title>Markdown</title><style type=\"text/css\"><!--h1{font-size:28px;color:rgb(0, 0, 0);}h2{font-size:24px;border-bottom:1px solid rgb(204,204,204);color:rgb(0,0,0);maargin:20px 0pt 10px;padding:0pt;font-wight:bold;}ul,ol{padding-left:30px;}strong,b{font-weight:bold;}table{border-collapse:collapse;border-spacing:0;font:inherit;margin:auto;}table td{border-bottom:1px solid #ddd;}table th{font-weight:bold;}table th,table td{border:1px solid rgb(204,204,204);padding:6px 13px;}table tr{border-top:1px solid #ccc;background-color:#fff}img{display:block;margin:auto;}video{display:block;margin:auto;}pre{background-color:#f8f8f8;border:1px solid #ddd;border-radius:3px 3px 3px 3px;font-size:13px;line-height:19px;overflow:auto;padding:6px 10px;}pre code,pre tt{background-color:transparent;border:medium none;margin:0;padding:0;}pre>code{white-space:pre;}code{white-space:nowrap;}code,tt{background-color:#f8f8f8;border:1px solid #ddd;border-radius:3px 3px 3px 3px;margin:0 2px;padding:0 5px;}.toc{padding:1em 1.5em;color:#999;font-size:.75em;margin-bottom:3em;border:1px solid #999;float:right;list-style-position:inside;background:#fff;}.toc li{}.toc>li{margin-bottom:1em;}.toc a,.toc a:link,.toc a:visited{color:#666;text-decoration:none;}.toc a:hover{color:#999;text-decoration:underline;}.toc>li>a{font-weight:bold;}.toc li li{}.toc li li a{}--></style></head><body></body></html>"
 #define DEFAULT_PIDFILE "/tmp/mmhd.pid"
 
+#define HOWDOWN_TOC_STARING 2
+#define HOWDOWN_TOC_NESTING 6
+
 typedef struct {
     char *root_dir;
     char *directory_index;
     char *style_file;
-    int enable_toc;
+    unsigned int extensions;
+    unsigned int html;
 } response_params_t;
 
 struct mime_type_t {
@@ -64,6 +71,43 @@ static const struct mime_type_t mimetype[] = {
     { 0, ".js", "application/javascript" },
     { 0, ".txt", "text/plain" }
 };
+
+struct markdown_opts_t {
+    const char *name;
+    unsigned int value;
+};
+
+static const struct markdown_opts_t markdown_opts[] = {
+    { "no_intra_emphasis", HOEDOWN_EXT_NO_INTRA_EMPHASIS },
+    { "tables", HOEDOWN_EXT_TABLES },
+    { "fenced_code", HOEDOWN_EXT_FENCED_CODE },
+    { "autolink", HOEDOWN_EXT_AUTOLINK },
+    { "strikethrough", HOEDOWN_EXT_STRIKETHROUGH },
+    { "underline", HOEDOWN_EXT_UNDERLINE },
+    { "space_headers", HOEDOWN_EXT_SPACE_HEADERS },
+    { "superscript", HOEDOWN_EXT_SUPERSCRIPT },
+    { "lax_spacing",  HOEDOWN_EXT_LAX_SPACING },
+    { "disable_indented_code", HOEDOWN_EXT_DISABLE_INDENTED_CODE },
+    { "highlight", HOEDOWN_EXT_HIGHLIGHT },
+    { "footnotes", HOEDOWN_EXT_FOOTNOTES },
+    { "quote", HOEDOWN_EXT_QUOTE },
+    { "special_attribute", HOEDOWN_EXT_SPECIAL_ATTRIBUTE },
+    { "skip_html", HOEDOWN_HTML_SKIP_HTML },
+    { "skip_style", HOEDOWN_HTML_SKIP_STYLE },
+    { "skip_images", HOEDOWN_HTML_SKIP_IMAGES },
+    { "skip_links", HOEDOWN_HTML_SKIP_LINKS },
+    { "expand_tabs", HOEDOWN_HTML_EXPAND_TABS },
+    { "safelink", HOEDOWN_HTML_SAFELINK },
+    { "toc", HOEDOWN_HTML_TOC },
+    { "hard_wrap", HOEDOWN_HTML_HARD_WRAP },
+    { "use_xhtml", HOEDOWN_HTML_USE_XHTML },
+    { "escape", HOEDOWN_HTML_ESCAPE },
+    { "prettify", HOEDOWN_HTML_PRETTIFY },
+    { "use_task_list", HOEDOWN_HTML_USE_TASK_LIST },
+    { "skip_eol", HOEDOWN_HTML_SKIP_EOL },
+    { "skip_toc_escape", HOEDOWN_HTML_SKIP_TOC_ESCAPE }
+};
+
 
 static char *
 contents_generate(size_t *length,
@@ -185,7 +229,7 @@ response_cb(void *cls, struct MHD_Connection *connection, const char *url,
     }
     *ptr = NULL; /* reset when done */
 
-    _debug(1, "URL=[%s]\n", url);
+    msg_verbose("URL=[%s]\n", url);
 
     snprintf(filepath, PATH_MAX, "%s%s", params->root_dir, url);
     if (stat(filepath, &statbuf) == 0) {
@@ -201,7 +245,7 @@ response_cb(void *cls, struct MHD_Connection *connection, const char *url,
             file = fopen(filepath, "rb");
         }
         if (file) {
-            _debug(2, "FilePath=[%s]\n", filepath);
+            msg_verbose_ex(2, "FilePath=[%s]\n", filepath);
             ext = strrchr(filepath, '.');
             if (!ext || ext == filepath) {
                 ext = NULL;
@@ -247,45 +291,45 @@ response_cb(void *cls, struct MHD_Connection *connection, const char *url,
         if (raw != NULL) {
             content_type = "text/plain";
         } else if (mimetype[i].markdown) {
-            int markdown_extensions = 0;
-            int toc_begin = 2, toc_end = 0;
-            struct buf *ib, *ob, *toc_ob = NULL;
-            struct sd_callbacks callbacks;
-            struct html_renderopt options;
-            struct sd_markdown *markdown;
+            unsigned int extensions = params->extensions;
+            unsigned int html = params->html;
+            int toc_starting = HOWDOWN_TOC_STARING;
+            int toc_nesting = HOWDOWN_TOC_NESTING;
+            hoedown_buffer *ib, *ob, *toc_ob = NULL;
+            hoedown_callbacks callbacks;
+            hoedown_html_renderopt options;
+            struct hoedown_markdown *markdown;
             int read;
 
-            ib = bufnew(SUNDOWN_READ_UNIT);
-            bufgrow(ib, SUNDOWN_READ_UNIT);
+            ib = hoedown_buffer_new(HOEDOWN_READ_UNIT);
+            hoedown_buffer_grow(ib, HOEDOWN_READ_UNIT);
             while ((read = fread(ib->data + ib->size, 1,
                                  ib->asize - ib->size, file)) > 0) {
                 ib->size += read;
-                bufgrow(ib, ib->size + SUNDOWN_READ_UNIT);
+                hoedown_buffer_grow(ib, ib->size + HOEDOWN_READ_UNIT);
             }
 
             fclose(file);
             file = NULL;
 
-            markdown_extensions |= MKDEXT_FENCED_CODE;
-            markdown_extensions |= MKDEXT_TABLES;
-            markdown_extensions |= MKDEXT_SPECIAL_ATTRIBUTES;
-
             /* toc */
-            if (params->enable_toc) {
+            if (html & HOEDOWN_HTML_TOC) {
+                html |= HOEDOWN_HTML_TOC;
+
                 if (toc) {
                     size_t len = strlen(toc);
                     int n;
 
                     if (len > 0) {
                         char *delim, *toc_b = NULL, *toc_e = NULL;
-                        delim = strstr(toc, ":");
+                        delim = strchr(toc, ',');
                         if (delim) {
                             int i = delim - toc;
                             toc_b = strndup(toc, i++);
                             if (toc_b) {
                                 n = atoi(toc_b);
                                 if (n) {
-                                    toc_begin = n;
+                                    toc_starting = n;
                                 }
                                 free(toc_b);
                             }
@@ -294,55 +338,60 @@ response_cb(void *cls, struct MHD_Connection *connection, const char *url,
                             if (toc_e) {
                                 n = atoi(toc_e);
                                 if (n) {
-                                    toc_end = n;
+                                    toc_nesting = n;
                                 }
                                 free(toc_e);
                             }
                         } else {
                             n = atoi(toc);
                             if (n) {
-                                toc_begin = n;
+                                toc_starting = n;
                             }
                         }
                     }
                 }
 
-                toc_ob = bufnew(SUNDOWN_OUTPUT_UNIT);
+                toc_ob = hoedown_buffer_new(HOEDOWN_OUTPUT_UNIT);
 
-                sdhtml_toc_renderer(&callbacks, &options);
+                hoedown_html_toc_renderer(&callbacks, &options, 0);
 
-                options.toc_data.begin_level = toc_begin;
-                if (toc_end) {
-                    options.toc_data.end_level = toc_end;
-                }
+                options.flags = html;
 
-                markdown = sd_markdown_new(markdown_extensions, 16,
-                                           &callbacks, &options);
+                options.toc_data.starting_level = toc_starting;
+                options.toc_data.nesting_level = toc_nesting;
+                options.toc_data.header = NULL;
+                options.toc_data.footer = NULL;
 
-                sd_markdown_render(toc_ob, ib->data, ib->size, markdown);
-                sd_markdown_free(markdown);
+                markdown = hoedown_markdown_new(extensions, 16,
+                                                &callbacks, &options);
+
+                hoedown_markdown_render(toc_ob, ib->data, ib->size, markdown);
+                hoedown_markdown_free(markdown);
             }
 
             /* contents */
-            ob = bufnew(SUNDOWN_OUTPUT_UNIT);
+            ob = hoedown_buffer_new(HOEDOWN_OUTPUT_UNIT);
 
-            sdhtml_renderer(&callbacks, &options, 0);
+            hoedown_html_renderer(&callbacks, &options, 0, 0);
 
-            options.flags = HTML_USE_XHTML | HTML_SKIP_LINEBREAK;
-            options.flags |= HTML_TOC;
+            //options.flags = HOEDOWN_HTML_USE_XHTML | HOEDOWN_HTML_SKIP_EOL;
+            //options.flags |= HOEDOWN_HTML_TOC;
+            options.flags = html;
+            options.toc_data.starting_level = toc_starting;
+            options.toc_data.nesting_level = toc_nesting;
 
-            markdown = sd_markdown_new(markdown_extensions, 16,
-                                       &callbacks, &options);
+            markdown = hoedown_markdown_new(extensions, 16,
+                                            &callbacks, &options);
 
-            sd_markdown_render(ob, ib->data, ib->size, markdown);
-            sd_markdown_free(markdown);
+            hoedown_markdown_render(ob, ib->data, ib->size, markdown);
+            hoedown_markdown_free(markdown);
 
             if (toc_ob) {
                 content = contents_generate(&content_length,
                                             ob->data, ob->size,
                                             toc_ob->data, toc_ob->size,
                                             params->style_file);
-                bufrelease(toc_ob);
+                hoedown_buffer_free(toc_ob);
             } else {
                 content = contents_generate(&content_length,
                                             ob->data, ob->size,
@@ -350,8 +399,8 @@ response_cb(void *cls, struct MHD_Connection *connection, const char *url,
                                             params->style_file);
             }
 
-            bufrelease(ob);
-            bufrelease(ib);
+            hoedown_buffer_free(ob);
+            hoedown_buffer_free(ib);
 
             if (content == NULL) {
                 return MHD_NO;
@@ -378,7 +427,7 @@ response_cb(void *cls, struct MHD_Connection *connection, const char *url,
         }
     }
 
-    _debug(2, "ContentType=[%s]\n", content_type);
+    msg_verbose_ex(2, "ContentType=[%s]\n", content_type);
 
     MHD_add_response_header(response, "Content-Type", content_type);
     /* MHD_add_response_header(response, "Content-Length", len); */
@@ -411,10 +460,10 @@ static void
 usage(char *arg, char *message)
 {
     char *command = arg;
+    int i, count = sizeof(markdown_opts) / sizeof(struct markdown_opts_t);
 
-    printf("Usage: %s [-p PORT] [-r DIR] [-d NAME] [-s FILE] [-t]", command);
-    printf("\n%*s        [-D COMMAND] [-P FILE]", (int)strlen(command), "");
-    printf("\n");
+    printf("Usage: %s [-p PORT] [-r DIR] [-d NAME] [-s FILE]",
+           " [-D COMMAND] [-P FILE]\n", command);
 
     printf("  -p, --port=PORT         server bind port [DEFAULT: %d]\n",
            DEFAULT_PORT);
@@ -423,13 +472,17 @@ usage(char *arg, char *message)
     printf("  -d, --directory=NAME    directory index file name [DEFAULT: %s]\n",
            DEFAULT_DIRECTORY_INDEX);
     printf("  -s, --style=FILE        style file\n");
-    printf("  -t, --toc               enable table of contents [DEFAULT: no]\n");
 
     printf("  -D, --daemonize=COMMAND daemon command [start|stop]\n");
     printf("  -P, --pidfile=FILE      daemon pid file path [DEFAULT: %s]\n",
            DEFAULT_PIDFILE);
 
     printf("  -v, --verbose           verbosity message\n");
+
+    printf("\nExtensions:\n");
+    for (i = 0; i < count; i++) {
+        printf("  --%s\n", markdown_opts[i].name);
+    }
 
     if (message) {
         printf("\nINFO: %s\n", message);
@@ -446,7 +499,7 @@ main(int argc, char **argv)
     struct stat statbuf;
 
     response_params_t params = { DEFAULT_ROOTDIR, DEFAULT_DIRECTORY_INDEX,
-                                 NULL, 0 };
+                                 NULL, 0, 0 };
 
     char *daemonize = NULL;
     char *pidfile = DEFAULT_PIDFILE;
@@ -457,15 +510,44 @@ main(int argc, char **argv)
         { "rootdir", 1, NULL, 'r' },
         { "directory", 1, NULL, 'd' },
         { "style", 1, NULL, 's' },
-        { "toc", 0, NULL, 't' },
         { "daemonize", 1, NULL, 'D' },
         { "pidfile", 1, NULL, 'P' },
         { "verbose", 1, NULL, 'v' },
         { "help", 0, NULL, 'h' },
+        { markdown_opts[0].name, 0, NULL, 'E' },
+        { markdown_opts[1].name, 0, NULL, 'E' },
+        { markdown_opts[2].name, 0, NULL, 'E' },
+        { markdown_opts[3].name, 0, NULL, 'E' },
+        { markdown_opts[4].name, 0, NULL, 'E' },
+        { markdown_opts[5].name, 0, NULL, 'E' },
+        { markdown_opts[6].name, 0, NULL, 'E' },
+        { markdown_opts[7].name, 0, NULL, 'E' },
+        { markdown_opts[8].name, 0, NULL, 'E' },
+        { markdown_opts[9].name, 0, NULL, 'E' },
+        { markdown_opts[10].name, 0, NULL, 'E' },
+        { markdown_opts[11].name, 0, NULL, 'E' },
+        { markdown_opts[12].name, 0, NULL, 'E' },
+        { markdown_opts[13].name, 0, NULL, 'E' },
+        { markdown_opts[14].name, 0, NULL, 'H' },
+        { markdown_opts[15].name, 0, NULL, 'H' },
+        { markdown_opts[16].name, 0, NULL, 'H' },
+        { markdown_opts[17].name, 0, NULL, 'H' },
+        { markdown_opts[18].name, 0, NULL, 'H' },
+        { markdown_opts[19].name, 0, NULL, 'H' },
+        { markdown_opts[20].name, 0, NULL, 'H' },
+        { markdown_opts[21].name, 0, NULL, 'H' },
+        { markdown_opts[22].name, 0, NULL, 'H' },
+        { markdown_opts[23].name, 0, NULL, 'H' },
+        { markdown_opts[24].name, 0, NULL, 'H' },
+        { markdown_opts[25].name, 0, NULL, 'H' },
+        { markdown_opts[26].name, 0, NULL, 'H' },
+        { markdown_opts[27].name, 0, NULL, 'H' },
         { NULL, 0, NULL, 0 }
     };
 
-    while ((opt = getopt_long(argc, argv, "p:r:d:s:tD:P:vh",
+    int i, opts_count = 27;
+
+    while ((opt = getopt_long(argc, argv, "p:r:d:s:D:P:EHvqVh",
                               long_options, NULL)) != -1) {
         switch (opt) {
             case 'p':
@@ -480,23 +562,47 @@ main(int argc, char **argv)
             case 's':
                 params.style_file = optarg;
                 break;
-            case 't':
-                params.enable_toc = 1;
-                break;
             case 'D':
                 daemonize = optarg;
                 break;
             case 'P':
                 pidfile = optarg;
                 break;
-            case 'v':
-                if (optarg) {
-                    verbose = atoi(optarg);
-                } else {
-                    verbose = 1;
+            case 'E':
+            case 'H':
+                for (i = 0; i < opts_count; i++) {
+                    struct markdown_opts_t opts = markdown_opts[i];
+                    if (strcmp(argv[optind-1] + 2, opts.name) == 0) {
+                        if (opt == 'E') {
+                            params.extensions |= opts.value;
+                        } else {
+                            params.html |= opts.value;
+                        }
+                        break;
+                    }
+                }
+                if (i == opts_count) {
+                    usage(argv[0], "Unknown options");
+                    return -1;
                 }
                 break;
-            default:
+            case 'v':
+                if (optarg) {
+                    msgno = atoi(optarg);
+                } else {
+                    msgno += 1;
+                }
+                break;
+            case 'q':
+                msgno = -1;
+                break;
+            case 'V':
+                printf("Micro http server for Markdown version: %d.%d.%d\n",
+                       MMHD_VERSION_MAJOR,
+                       MMHD_VERSION_MINOR,
+                       MMHD_VERSION_BUILD);
+                return 0;
+            case 'h':
                 usage(argv[0], NULL);
                 return -1;
         }
@@ -508,19 +614,19 @@ main(int argc, char **argv)
     }
 
     if (stat(params.root_dir, &statbuf) != 0) {
-        fprintf(stderr, "ERR: no such document root directory: %s\n",
-                params.root_dir);
+        msg_error("ERROR: No such document root directory: %s\n",
+                  params.root_dir);
         params.root_dir = ".";
     }
-    _debug(2, "DocumentRoot=[%s]\n", params.root_dir);
+    msg_verbose_ex(2, "DocumentRoot=[%s]\n", params.root_dir);
 
     if (params.style_file) {
         if (stat(params.style_file, &statbuf) != 0) {
-            fprintf(stderr, "ERR: no such style file: %s\n", params.style_file);
+            msg_error("ERROR: No such style file: %s\n", params.style_file);
             params.style_file = NULL;
         }
     }
-    _debug(2, "StyleFile=[%s]\n", params.style_file);
+    msg_verbose_ex(2, "StyleFile=[%s]\n", params.style_file);
 
     /* daemonize */
     if (daemonize) {
@@ -529,7 +635,7 @@ main(int argc, char **argv)
             return -1;
         }
 
-        _debug(2, "PidFile=[%s]\n", pidfile);
+        msg_verbose_ex(2, "PidFile=[%s]\n", pidfile);
 
         openlog("micro markdown http server", LOG_PID, LOG_DAEMON);
         if (strcasecmp(daemonize, "start") == 0) {
@@ -539,7 +645,7 @@ main(int argc, char **argv)
 
             if (daemon(nochdir, noclose) == -1) {
                 syslog(LOG_INFO, "Failed to %s daemon\n", argv[0]);
-                _err("Invalid daemon start");
+                msg_error("Invalid daemon start");
                 return -1;
             }
             syslog(LOG_INFO, "%s daemon startted\n", argv[0]);
@@ -582,14 +688,14 @@ main(int argc, char **argv)
         return -1;
     }
 
-    _debug(1, "Starting server [%d] ...\n", port);
+    msg_verbose("Starting server [%d] ...\n", port);
 
     signals();
     while (!interrupted) {
         sleep(300);
     }
 
-    _debug(1, "\nFinished\n");
+    msg_verbose("\nFinished\n");
 
     MHD_stop_daemon(mhd);
 

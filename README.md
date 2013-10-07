@@ -8,9 +8,9 @@ libmicrohttpd library.
 
 * [libmicrohttpd](http://www.gnu.org/software/libmicrohttpd)
 
-sundown library.
+hoedown library.
 
-* [sundown](https://github.com/kjdev/sundown)
+* [hoedown](https://github.com/kjdev/hoedown)
 
 ## Build
 
@@ -39,7 +39,6 @@ required.
  -r, --rootdir   | document root directory   | .
  -d, --directory | directory index file name | index.md
  -s, --style     | style file                |
- -t, --toc       | enable table of contents  |
  -D, --daemonize | daemon command            |
  -P, --pidfile   | daemon pid file path      | /tmp/mmhd.pid
 
